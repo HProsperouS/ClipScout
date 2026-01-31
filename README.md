@@ -23,7 +23,7 @@ This project is an internship exercise implementation for Videotto. The goal is 
     - `POST /api/jobs/from-link` – create a job from a YouTube or Dropbox link.
     - `GET /api/jobs/{job_id}` – fetch job status and (when ready) clip results.
     - `GET /api/jobs/{job_id}/clips` – fetch only the clips (409 if not completed).
-  - Optional deployment: single Docker container on **AWS EC2** (no ALB); see [Deploying to AWS](#deploying-to-aws-ec2) below.
+  - Deployment: single Docker container on **AWS EC2**; see [Deploying to AWS](#deploying-to-aws-ec2) below.
 
 - **Domain design**
   - `Job` – represents a single processing run (`id`, `status`, `clips`, `error_message`).
@@ -31,7 +31,7 @@ This project is an internship exercise implementation for Videotto. The goal is 
   - Layers:
     - `backend/app` – FastAPI wiring, HTTP schemas and routes.
     - `backend/domain` – business logic (clip ranking, job orchestration).
-    - `backend/infrastructure` – ffmpeg, Whisper ASR, YouTube/Dropbox downloaders, in‑memory persistence.
+    - `backend/infrastructure` – **ffmpeg** (extracts mono 16 kHz WAV from video for energy/speech analysis), **Whisper ASR** (transcribes audio to timestamped text and extracts keywords for clip scoring), YouTube/Dropbox downloaders, in‑memory job store (job state in RAM; uploaded video files are written to disk under `jobs/`).
 
 ---
 
@@ -47,52 +47,42 @@ Each candidate clip is scored using up to three signals:
 
 1. **Audio energy** – how loud / dynamic the segment is (RMS, normalized).
 2. **Speech activity density** – how much of the segment contains active speech or strong audio (simple energy-based VAD proxy).
-3. **Keyword relevance** (optional) – when Whisper ASR is available, we transcribe the audio, extract top keywords by frequency (excluding stopwords), and score each clip by how many of those keywords appear in speech within that clip’s time range.
+3. **Keyword relevance** – We also transcribe the audio, extract top keywords by frequency (excluding stopwords), and score each clip by how many of those keywords appear in speech within that clip’s time range. If Whisper is missing or fails, we use only energy and speech density (keyword_score = 0).
 
-Signals are normalized to \[0, 1\] and combined:
+All three signals are in [0, 1]. The combined score is:
 
-\[
-score = w_\text{energy} \cdot energy\_score + w_\text{speech} \cdot speech\_density\_score + w_\text{keyword} \cdot keyword\_score
-\]
+```
+score = w_energy × energy_score + w_speech × speech_density_score + w_keyword × keyword_score
+```
 
-Default weights when Whisper is used: \(w_\text{energy} = 0.35\), \(w_\text{speech} = 0.35\), \(w_\text{keyword} = 0.3\). If Whisper is not installed or fails, we fall back to energy + speech only (e.g. 0.4 and 0.6).
+- **When Whisper is used:** `w_energy = 0.35`, `w_speech = 0.35`, `w_keyword = 0.3` (weights are normalized).
+- **When Whisper is missing or fails:** `keyword_score = 0` and we use only energy and speech (`w_energy = 0.35`, `w_speech = 0.35`, effectively 50/50).
 
 ### Detailed pipeline
 
-1. **Extract audio from video**
-   - Use `ffmpeg` (via `backend/infrastructure/ffmpeg_adapter.py`) to extract mono 16 kHz WAV audio from the input video.
+1. **Extract audio from video** (`backend/infrastructure/ffmpeg_adapter.py`)
+   - ffmpeg extracts **mono 16 kHz WAV** from the input video (`extract_audio()`). This WAV is used for energy/speech analysis and (when used) Whisper.
 
-2. **Frame the audio**
-   - Resample to 16 kHz and split into **non‑overlapping 1‑second frames**.
-   - Each frame represents 1 second of audio for which we compute features.
+2. **Frame the audio** (`clip_ranker`: `_frame_signal`, librosa)
+   - Load the WAV at 16 kHz and split into **non-overlapping 1-second frames** (`frame_duration_seconds=1.0`). Each frame is one second of audio for feature computation.
 
-3. **Compute per‑frame energy**
-   - For each frame, compute **RMS energy**.
-   - Normalize energies so the maximum observed energy becomes 1.0 and others fall in \[0, 1\].
+3. **Compute per-frame energy** (`_compute_window_energy`)
+   - For each frame, compute **RMS energy**, then normalize so the maximum over all frames is 1.0 and values lie in [0, 1].
 
-4. **Approximate speech activity (simple VAD proxy)**
-   - Instead of using a heavy ASR model, approximate speech activity directly from energy:
-     - Values above a threshold (default 0.3) are treated as “more likely speech or meaningful audio”.
-     - Map energies into \[0, 1\] so we obtain a **speech activity score per frame**.
-   - This keeps the system lightweight and easy to run anywhere, while still capturing where the content is active.
+4. **Approximate speech activity** (`_compute_speech_activity`)
+   - Simple VAD proxy from energy: threshold = 0.3; map energy to [0, 1] with `(energy - 0.3) / (1 - 0.3)` and clip. Yields a **speech activity score per frame** without a separate ASR model.
 
-5. **Build candidate clips with a sliding window**
-   - Choose a fixed clip length, e.g. **15 seconds**, and a step size, e.g. **5 seconds**.
-   - Slide a window over the per‑second frames to construct overlapping candidate clips.
-   - For each candidate clip:
-     - `energy_score` = mean energy across all frames in the window.
-     - `speech_density_score` = mean speech activity across all frames in the window.
+5. **Build candidate clips** (`_sliding_window_indices`)
+   - **Clip length 15 s**, **step 5 s**. Slide the window over frames to get overlapping candidate clips. For each candidate: `energy_score` = mean of frame energies in the window; `speech_density_score` = mean of speech activity in the window.
 
-6. **Optional: Whisper ASR and keyword scoring**
-   - If `openai-whisper` is installed, we transcribe the audio to segments with timestamps, extract top‑20 keywords (by frequency, excluding stopwords), and compute per‑clip `keyword_score` from keyword hits in that time range. This is blended into the final score.
+6. **Whisper ASR and keyword scoring** (`whisper_adapter`, `_keyword_score_for_clip`)
+   - When Whisper is used: transcribe to timestamped segments (default model `tiny`, env `WHISPER_MODEL`), extract **top 20 keywords** by frequency (excluding stopwords), then for each candidate clip get the text in that time range and score by keyword hits (normalized). If Whisper is missing or fails, `keyword_score = 0`.
 
-7. **Score and select Top 3**
-   - For each candidate clip, compute the weighted score (energy + speech + optional keyword).
-   - Sort all candidates by score (descending).
-   - Return the **top 3** as the final results.
+7. **Score and select top 3** (`_extract_top_clips_from_audio`)
+   - For each candidate, compute the weighted score (energy + speech + keyword). Sort by score descending and return the **top 3** clips (`top_k=3`).
 
-8. **Human‑readable explanations**
-   - For each selected clip we generate a short text explanation (time range, energy/speech/keyword signals, and a prose reason). These are returned to the frontend so the ranking is **transparent and easy to justify**.
+8. **Human-readable explanations** (`_build_reason`)
+   - For each selected clip, build a short explanation: time range (HH:MM:SS), energy/speech (and keyword if used) percentages, and a prose reason. Returned to the frontend so the ranking is transparent.
 
 ### Why this approach
 
@@ -109,36 +99,24 @@ Default weights when Whisper is used: \(w_\text{energy} = 0.35\), \(w_\text{spee
 
 ## RESTful API design (status & progress)
 
-Rather than a single “RPC‑style” `/process` endpoint, the backend models processing as a **Job resource**, which is more idiomatic for REST and makes progress tracking explicit.
+The backend models processing as a **Job resource** (`backend/app/api/routes_jobs.py`; schemas in `backend/app/schemas/jobs.py` and `clips.py`). Progress is tracked explicitly via job status.
 
-- **Create job (file upload)**
-  - `POST /api/jobs`
-  - Request: `multipart/form-data` with a `file` field (video file).
-  - Behavior: saves the video under `jobs/`, creates a `Job` with status `processing`, schedules background processing, returns `202 Accepted` with `id`, `status="processing"`, empty `clips`.
+- **Create job (file upload)** — `POST /api/jobs`
+  - Request: `multipart/form-data` with a `file` field (video file). Upload is streamed to disk in chunks; no hard size limit by default (set `MAX_UPLOAD_MB` in env to cap).
+  - Success: `202 Accepted` with `{ "id", "status": "processing", "clips": [], "error_message": null }`.
+  - Errors: `400` (no file / empty file), `413` (file too large when `MAX_UPLOAD_MB` set), `507` (disk full), `500` (upload/server error); response body includes a `detail` message.
 
-- **Create job (YouTube or Dropbox link)**
-  - `POST /api/jobs/from-link`
-  - Request: JSON body `{ "url": "<link>", "source": "youtube" | "dropbox" }`.
-  - Behavior: downloads content (yt-dlp for YouTube, HTTP for Dropbox), then same processing as above; returns `202 Accepted`.
+- **Create job (YouTube or Dropbox link)** — `POST /api/jobs/from-link`
+  - Request: JSON `{ "url": "<link>", "source": "youtube" | "dropbox" }`. YouTube uses yt-dlp; Dropbox uses HTTP with `?dl=1`. On EC2, set `YT_COOKIES_FILE` if YouTube returns "sign in to confirm you're not a bot".
+  - Success: `202 Accepted` (same shape as above). Errors: `400` (missing url, invalid source, invalid URL).
 
-- **Get job status and results**
-  - `GET /api/jobs/{job_id}`
-  - Response:
-    - `id`
-    - `status`: `"processing" | "completed" | "failed"`
-    - `clips`: array of clip objects once completed.
-    - `error_message`: error info if the job failed.
+- **Get job status and results** — `GET /api/jobs/{job_id}`
+  - Response: `{ "id", "status": "processing" | "completed" | "failed", "clips": [...], "error_message": null | string }`. Each clip has `start`, `end`, `score`, `energy_score`, `speech_density_score`, `keyword_score`, `reason`. Errors: `404` if job not found.
 
-- **Get clips only**
-  - `GET /api/jobs/{job_id}/clips`
-  - Returns the clip array when `status="completed"`.
-  - Returns `409` if the job is not completed yet.
+- **Get clips only** — `GET /api/jobs/{job_id}/clips`
+  - Returns the clip array when `status="completed"`. Errors: `404` (job not found), `409` (job not completed yet).
 
-This design makes it natural for the frontend to:
-
-- Fire an upload request once.
-- Poll `GET /api/jobs/{job_id}` every few seconds.
-- Stop polling when the job reaches `"completed"` or `"failed"`.
+**Frontend flow:** Send one upload request; poll `GET /api/jobs/{job_id}` every few seconds; stop when `status` is `"completed"` or `"failed"` and display clips or `error_message`.
 
 ---
 
@@ -218,41 +196,17 @@ A simple production setup uses **one EC2 instance** (no Application Load Balance
 ### Architecture
 
 - **EC2** – single instance; install Docker and run one container that serves the FastAPI app plus the built React static files.
-- **No ALB** – access the app via the instance **public IP** (or an Elastic IP). Open port **80** (and optionally **22** for SSH) in the security group.
 - **Storage** – uploaded videos and extracted audio are stored under a directory on the instance (e.g. `jobs/`). For persistence across restarts, use the instance root volume or attach an EBS volume.
 
-### Terraform (recommended)
+### Terraform
 
-Use the `terraform/` directory to provision EC2 + security group (no ALB). See **terraform/README.md** for:
+Using Terraform (infrastructure as code) keeps EC2 and security group definitions in versioned config files: you can **reproduce** the same environment anywhere, **review changes** with `terraform plan` before applying, **tear down** and recreate resources in one command, and **share** the setup with the team. No manual clicking in the AWS console; one `terraform apply` provisions the instance and opens the right ports.
+
+Use the `terraform/` directory to provision EC2 + security group. See **terraform/README.md** for:
 
 - `terraform init` → `terraform plan` → `terraform apply`
 - Set `key_name` in `terraform.tfvars` (EC2 key pair for SSH)
-- After apply: SSH to the instance, build/run the Docker image, then open `http://<public_ip>:8000`
-
-### Steps (outline)
-
-1. **Build and run with Docker** (from project root):
-   - `docker build -t clipscout .` then `docker run -p 8000:8000 clipscout`. The image includes the backend, built frontend, ffmpeg, and Python deps (including `openai-whisper` for keyword scoring). FastAPI serves both `/api/*` and the static SPA on port 8000.
-   - On EC2, expose port 8000 in the security group and use `http://<public-ip>:8000`, or put Nginx/Caddy on port 80 proxying to 8000.
-
-2. **Launch EC2**
-   - AMI: Amazon Linux 2 or Ubuntu.
-   - Instance type: **t2.micro** or **t3.micro** (Free Tier).
-   - Security group: allow **22** (SSH), **80** (HTTP); if you skip a reverse proxy, allow **8000** and use `http://<public-ip>:8000`.
-
-3. **On the instance**
-   - Install Docker (and Docker Compose if you use it), clone the repo, build the image, and run the container. Ensure the app listens on `0.0.0.0` and that the `jobs` directory is writable (e.g. a volume or host path).
-
-4. **Frontend API base**
-   - When serving the SPA from the same host as the API, set the frontend `API_BASE` to `""` (relative URLs) so the browser uses the same origin.
-
-5. **Optional: Whisper on 1 GB RAM**
-   - For t2.micro/t3.micro, use Whisper **tiny** (or **base** with care) to reduce memory use; you can set the model size via environment or config.
-
-6. **YouTube “Sign in to confirm you’re not a bot” (EC2)**
-   - When running on EC2, YouTube may require bot verification. Export YouTube cookies from your browser (Netscape format; e.g. “Get cookies.txt” extension), put the file on the instance, and run the container with `-e YT_COOKIES_FILE=/app/cookies.txt -v /path/on/ec2/cookies.txt:/app/cookies.txt:ro`. Rebuild/restart the container after adding the volume and env. See [yt-dlp FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
-
-Once the container is running and the security group allows traffic, open `http://<public-ip>:8000` in a browser to use ClipScout.
+- After apply: SSH to the instance, build/run the Docker image, then open `http://54.169.218.27:8000`
 
 ---
 
@@ -261,24 +215,20 @@ Once the container is running and the security group allows traffic, open `http:
 With more time, the following improvements would be high‑value:
 
 - **Richer clip quality model**
-  - Whisper + keyword scoring is already in place; possible extensions: sentence‑level importance (e.g. embeddings + clustering), topic or sentiment weighting.
+  - We already use Whisper and keyword scoring. For example: add **sentiment** so that anger or other strong emotions push a clip up or down; or when someone uploads a **YouTube link**, use the video **title** (and maybe description) and score clips by how well their keywords match the title—so highlights stay on-topic instead of just “loud + speechy”.
 
-- **Better VAD / diarization**
+- **Better VAD(Voice Activity Detection)**
   - Replace the simple energy‑threshold proxy with a real VAD model.
   - Optionally identify speaker turns and prioritize segments with more interaction.
 
 - **Adaptive clip length**
-  - Dynamically adjust clip length based on speaking pace and scene changes.
-  - Optionally merge overlapping high‑score windows into a single longer highlight.
+  - Right now every clip is a fixed 15 seconds. We can  **change clip length by context**: e.g. shorter when people talk fast (so one “idea” fits in one clip), longer when they talk slow; or align clip boundaries with **scene cuts** so a highlight doesn’t cut in the middle of a scene. Also **merge** overlapping high‑score segments (e.g. 0–15s and 5–20s) into one longer highlight instead of returning two overlapping clips.
 
 - **Persistence and scalability**
   - Replace the in‑memory Job repository with DynamoDB or a relational database.
-  - Store original videos and extracted audios on S3.
-  - Add background workers (e.g. Celery, AWS SQS + Lambda) for heavy processing.
+  - Store original videos and extracted audios on S3. Turn on **S3 lifecycle rules** to expire or transition old objects (e.g. delete after 7 days, or move to Glacier); that keeps storage costs down by cleaning up files automatically.
 
 - **More UX polish**
-  - Show a visual progress indicator while processing.
-  - Add a small embedded video player that can seek directly to each clip.
+  - Embed a small video player so users can jump straight to each highlight instead of copying timestamps elsewhere.
 
-Even without these extensions, the current solution satisfies the core requirements of the exercise, with a clear, explainable ranking strategy and a clean, RESTful architecture suitable for production‑style discussions.
 
