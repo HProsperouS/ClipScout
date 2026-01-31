@@ -196,9 +196,7 @@ npm install
 npm run dev
 ```
 
-Then open `http://localhost:5173` in the browser.
-
-Make sure the `API_BASE` in the React app is pointing to the correct backend URL (by default `http://localhost:8000`).
+Then open **`http://localhost:5173`** in the browser (not `http://localhost:8000`). The frontend talks to the API at `http://localhost:8000` by default when in dev mode (`VITE_API_BASE` can override this).
 
 ### Running with Docker
 
@@ -251,7 +249,10 @@ Use the `terraform/` directory to provision EC2 + security group (no ALB). See *
 5. **Optional: Whisper on 1 GB RAM**
    - For t2.micro/t3.micro, use Whisper **tiny** (or **base** with care) to reduce memory use; you can set the model size via environment or config.
 
-Once the container is running and the security group allows traffic, open `http://<public-ip>` (or `http://<public-ip>:8000`) in a browser to use ClipScout.
+6. **YouTube “Sign in to confirm you’re not a bot” (EC2)**
+   - When running on EC2, YouTube may require bot verification. Export YouTube cookies from your browser (Netscape format; e.g. “Get cookies.txt” extension), put the file on the instance, and run the container with `-e YT_COOKIES_FILE=/app/cookies.txt -v /path/on/ec2/cookies.txt:/app/cookies.txt:ro`. Rebuild/restart the container after adding the volume and env. See [yt-dlp FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
+
+Once the container is running and the security group allows traffic, open `http://<public-ip>:8000` in a browser to use ClipScout.
 
 ---
 

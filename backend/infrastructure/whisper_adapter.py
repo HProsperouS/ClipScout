@@ -30,10 +30,10 @@ class TranscriptSegment:
     text: str
 
 
-def transcribe(audio_path: Path, *, model_size: str = "base") -> List[TranscriptSegment]:
+def transcribe(audio_path: Path, *, model_size: str = "tiny") -> List[TranscriptSegment]:
     """
     Run Whisper on an audio file and return segments with timestamps.
-    Uses the given model size (tiny, base, small, medium, large).
+    Uses the given model size (tiny, base, small, medium, large). Default tiny for lower memory use.
     """
     import whisper
 
