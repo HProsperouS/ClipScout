@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useEffect, useState } from "react";
 
 type Clip = {
   start: number;
@@ -128,14 +128,16 @@ function App() {
       });
 
       if (!res.ok) {
-        throw new Error("Failed to create job");
+        const err = await res.json().catch(() => ({}));
+        const msg = err.detail ?? "Failed to create job";
+        throw new Error(typeof msg === "string" ? msg : Array.isArray(msg) ? msg[0] : "Failed to create job");
       }
 
       const data: JobDetail = await res.json();
       setJob(data);
     } catch (e) {
       console.error(e);
-      setError("Failed to create processing job. Check that the backend is running.");
+      setError("Hi. Failed to create processing job. Check that the backend is running.");
       setUiState("idle");
     }
   };
@@ -184,6 +186,9 @@ function App() {
               ({(selectedFile.size / (1024 * 1024)).toFixed(1)} MB)
             </p>
           )}
+          <p className="text-xs text-muted-foreground">
+            Large files are supported; upload may take a while depending on size and connection.
+          </p>
           {error && <p className="text-xs text-red-500">{error}</p>}
         </section>
 

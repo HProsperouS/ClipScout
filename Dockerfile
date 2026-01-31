@@ -17,4 +17,4 @@ COPY backend/ ./backend/
 COPY --from=frontend-builder /app/frontend/dist ./static
 RUN mkdir -p jobs
 EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "300"]

@@ -1,15 +1,31 @@
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from backend.app.api import routes_jobs
 
+logger = logging.getLogger("uvicorn.access")
 
 app = FastAPI(title="ClipScout API", version="0.1.0")
 
+
+class LogRequestsMiddleware(BaseHTTPMiddleware):
+    """Log when a request is received (before body is read), so long uploads show up immediately."""
+
+    async def dispatch(self, request, call_next):
+        method = request.method
+        path = request.url.path
+        logger.info("Request started: %s %s", method, path)
+        response = await call_next(request)
+        return response
+
+
+app.add_middleware(LogRequestsMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

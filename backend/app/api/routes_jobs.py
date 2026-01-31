@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
@@ -7,6 +8,10 @@ from backend.app.schemas.jobs import JobCreatedResponse, JobDetail, JobFromLinkR
 from backend.domain.models import JobStatus
 from backend.domain.services.job_service import create_job, get_job, run_job, run_job_from_link
 
+# Optional max upload size in MB (0 = no limit). Set MAX_UPLOAD_MB in env to cap size.
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "0"))  # 0 means no limit
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024 if MAX_UPLOAD_MB else 0
+CHUNK_SIZE = 1024 * 1024  # 1 MB per read, keeps memory use low for large files
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -18,9 +23,17 @@ async def create_processing_job(
 ):
     """
     Create a new processing job from an uploaded video file.
+    Large files are streamed to disk (no hard limit by default). Set MAX_UPLOAD_MB in env to cap size.
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file uploaded")
+
+    size = getattr(file, "size", None)
+    if MAX_UPLOAD_BYTES and size is not None and size > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_UPLOAD_MB} MB (set MAX_UPLOAD_MB to allow more).",
+        )
 
     job = create_job()
     suffix = Path(file.filename).suffix or ".mp4"
@@ -28,11 +41,44 @@ async def create_processing_job(
     jobs_dir.mkdir(parents=True, exist_ok=True)
     video_path = jobs_dir / f"{job.id}{suffix}"
 
-    with video_path.open("wb") as f:
-        content = await file.read()
-        if not content:
+    try:
+        total = 0
+        with video_path.open("wb") as f:
+            while True:
+                chunk = await file.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if MAX_UPLOAD_BYTES and total > MAX_UPLOAD_BYTES:
+                    video_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Maximum size is {MAX_UPLOAD_MB} MB.",
+                    )
+                f.write(chunk)
+
+        if total == 0:
+            video_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
-        f.write(content)
+    except HTTPException:
+        raise
+    except OSError as e:
+        video_path.unlink(missing_ok=True)
+        if e.errno == 28:  # ENOSPC
+            raise HTTPException(
+                status_code=507,
+                detail="Server ran out of disk space. Free space on the instance or use a smaller file / link.",
+            ) from e
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save file: {e!s}. Check disk space and permissions.",
+        ) from e
+    except Exception as e:
+        video_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Upload failed: {e!s}. For large files, check server disk space and logs.",
+        ) from e
 
     background_tasks.add_task(run_job, job.id, video_path)
 
