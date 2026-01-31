@@ -56,7 +56,6 @@ score = w_energy × energy_score + w_speech × speech_density_score + w_keyword 
 ```
 
 - **When Whisper is used:** `w_energy = 0.35`, `w_speech = 0.35`, `w_keyword = 0.3` (weights are normalized).
-- **When Whisper is missing or fails:** `keyword_score = 0` and we use only energy and speech (`w_energy = 0.35`, `w_speech = 0.35`, effectively 50/50).
 
 ### Detailed pipeline
 
