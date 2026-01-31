@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars and fill in your key name.
+# Create a key pair in AWS Console: EC2 -> Key Pairs -> Create, then download the .pem.
+
+aws_region    = "ap-southeast-1"
+architecture  = "arm64"   # use arm64 to run Mac-built Docker image; or x86_64 for t3.micro
+instance_type = "t4g.micro"
+key_name      = "your-key-pair-name"
+app_port      = 8000

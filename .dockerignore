@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+node_modules
+frontend/node_modules
+frontend/dist
+jobs
+*.md
+.env
+.env.*
+*.pdf
+.cursor
+.idea
+.vscode

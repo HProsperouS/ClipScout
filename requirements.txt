@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-multipart
+ffmpeg-python
+librosa
+numpy
+soundfile
+yt-dlp
+requests
+openai-whisper

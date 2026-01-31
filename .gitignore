@@ -1,0 +1,37 @@
+# Python
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Node
+node_modules/
+frontend/node_modules
+frontend/dist
+
+# Local / generated
+jobs/
+clipscout.tar
+.env
+.env.*
+*.log
+
+# IDE / OS
+.cursor
+.idea
+.vscode
+.DS_Store
+
+# Terraform (state and secrets)
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfvars
+!terraform/terraform.tfvars.example
+
+# Optional: exercise PDF (uncomment if you want to exclude)
+# *.pdf
