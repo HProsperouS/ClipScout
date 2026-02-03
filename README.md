@@ -6,6 +6,13 @@ This project is an internship exercise implementation for Videotto. The goal is 
 
 ---
 
+## Why these signals? (energy + speech + keyword)
+Energy: Loud sections (reactions, emphasis, key moments) stand out from quiet parts, so RMS energy is a simple, robust proxy for “something is happening here.”
+Speech density: In talk-heavy content, highlights are often where the speaker is talking a lot (explanations, punchlines). A simple energy-based “speech-like” activity score helps favor those segments.
+Keyword relevance: When Whisper is available, scoring by keyword hits in the transcript ties clips to the actual topic. That gives a content-based signal on top of pure audio, so the “best” clips are not only loud and talky but also relevant to what was said.
+So: energy + speech = “something is happening and someone is talking”; keywords = “and it’s about the right content.” Together they balance low-level audio and higher-level content.
+
+---
 ## High‑level architecture
 
 - **Frontend**
